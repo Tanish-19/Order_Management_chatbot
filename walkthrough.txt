@@ -1,0 +1,397 @@
+# FoodieBot — Complete Code Explanation
+
+## What is this project?
+
+This is an **AI-powered food ordering chatbot** called **FoodieBot**. Instead of clicking buttons and navigating menus like a normal food delivery app, the user **types messages in natural language** (like "I want a burger" or "show me the menu") and the bot **understands what they want** and responds accordingly.
+
+It's built with the **MERN stack** (MongoDB, Express, React, Node.js) + **Socket.IO** for real-time chat + **node-nlp** for AI/NLP understanding.
+
+---
+
+## High-Level Architecture
+
+```mermaid
+flowchart LR
+    subgraph Frontend ["Frontend (React + Vite)"]
+        UI["Chat UI"]
+    end
+
+    subgraph Backend ["Backend (Node.js + Express)"]
+        SIO["Socket.IO Server"]
+        NLP["NLP Engine (node-nlp)"]
+        CH["Chatbot Handler"]
+        CM["Context Manager"]
+        API["REST API (Auth, Products, Orders)"]
+        DB["MongoDB (Mongoose)"]
+    end
+
+    UI -- "chatMessage (WebSocket)" --> SIO
+    SIO -- "botMessage (WebSocket)" --> UI
+    SIO --> CH
+    CH --> NLP
+    CH --> CM
+    CH --> DB
+    UI -- "HTTP requests" --> API
+    API --> DB
+```
+
+---
+
+## Backend — How Everything Starts
+
+### [server.js](file:///Users/tanishpatgaonkar/Projects/Chatbot/backend/server.js) — The Entry Point
+
+When you run `npm run dev`, this file runs. Here's what happens **in order**:
+
+| Step | What Happens | Why |
+|------|-------------|-----|
+| 1 | `connectDB()` | Connects to MongoDB using Mongoose |
+| 2 | `seedProducts()` | Inserts 28 food items into DB (only if empty) |
+| 3 | `trainModel()` | **Trains the NLP AI model** with all the example sentences |
+| 4 | Creates Express + HTTP server | Standard web server setup |
+| 5 | Creates Socket.IO server | For **real-time** chat (not REST API — WebSockets) |
+| 6 | Mounts REST routes | `/api/auth`, `/api/products`, `/api/orders` |
+| 7 | Listens for socket connections | When a user connects, it listens for `chatMessage` events |
+
+### The Chat Flow (Socket.IO)
+
+This is the **core loop** of the chatbot:
+
+```
+User types "I want a burger"
+       ↓
+Frontend emits socket event: chatMessage({ text: "I want a burger", sessionId: "abc123", userId: "..." })
+       ↓
+Server receives it → calls chatbotHandler.handleMessage("I want a burger", "abc123", userId)
+       ↓
+NLP processes the text → determines intent = "order.food", extracts entity = "burger"
+       ↓
+Handler searches MongoDB for burger products → finds 4 burgers
+       ↓
+Server emits socket event: botMessage({ text: "Found 4 burger items!", type: "products", data: {...} })
+       ↓
+Frontend renders product cards
+```
+
+> [!IMPORTANT]
+> The chatbot uses **WebSockets (Socket.IO)** instead of REST APIs for the chat. This means messages are **instant** — no HTTP request/response overhead. The server pushes responses to the client in real-time.
+
+---
+
+## 🧠 The NLP System — Deep Dive
+
+This is the **brain** of the chatbot. It uses the **`node-nlp`** library (version 5.0.0-alpha.5), which is an open-source Natural Language Processing library for Node.js.
+
+### What is NLP?
+
+NLP = **Natural Language Processing**. It's AI that lets a computer understand human language. When you say "I want a burger", the computer needs to figure out:
+1. **Intent** — What does the user *want to do*? → They want to ORDER FOOD
+2. **Entity** — What *specific thing* are they talking about? → BURGER
+
+### The Library: `node-nlp`
+
+[node-nlp](https://github.com/axa-group/nlp.js) is built by AXA Group. Under the hood, it uses:
+
+| Component | What It Does | How It Works |
+|-----------|-------------|--------------|
+| **NLU (Natural Language Understanding)** | Classifies the user's *intent* | Uses a **neural network classifier** (a small ML model) trained on your example sentences |
+| **NER (Named Entity Recognition)** | Extracts specific *entities* (like food names) from the text | Uses pattern matching + dictionary lookup against your registered entity lists |
+| **Sentiment Analysis** | Detects if the user is happy/angry/neutral | Built-in sentiment scoring |
+| **Language Guesser** | Detects what language the text is in | Statistical analysis of character patterns |
+
+> [!NOTE]
+> This is NOT calling an external AI API like ChatGPT. The entire NLP model is **trained and runs locally** on your machine/server. The trained model is saved as [model.nlp](file:///Users/tanishpatgaonkar/Projects/Chatbot/backend/model.nlp) (118 KB file).
+
+---
+
+### [nlpManager.js](file:///Users/tanishpatgaonkar/Projects/Chatbot/backend/nlp/nlpManager.js) — Training the AI
+
+This file does two things: **trains the model** and **processes messages**.
+
+#### Step 1: Create the Manager
+
+```js
+const manager = new NlpManager({ languages: ['en'], forceNER: true, nlu: { log: false } });
+```
+
+- `languages: ['en']` — We only understand English
+- `forceNER: true` — Always try to extract entities (food names), even if the sentence doesn't match perfectly
+- `nlu: { log: false }` — Don't print training logs to console
+
+#### Step 2: Train with Example Sentences (Intent Classification)
+
+This is the **most important part**. You're teaching the AI by giving it **examples** of what users might say, and labeling each example with an **intent** (what the user wants).
+
+Think of it like teaching a child:
+- "When someone says *hello* or *hi* or *hey* → they are **greeting** you"
+- "When someone says *show me the menu* or *what do you have* → they want to **see the menu**"
+
+Here are all **15 intents** the bot understands:
+
+| Intent | What It Means | Example Phrases |
+|--------|--------------|-----------------|
+| `greetings.hello` | User is saying hi | "hello", "hey", "good morning" |
+| `menu.show` | User wants to see the full menu | "show me the menu", "what do you have" |
+| `order.food` | User wants a specific food item | "I want a burger", "suggest me sandwich" |
+| `cart.add` | User wants to add something to cart | "add to cart", "add the first one" |
+| `cart.view` | User wants to see their cart | "show my cart", "what is in my cart" |
+| `cart.remove` | User wants to remove from cart | "remove from cart", "clear cart" |
+| `order.place` | User wants to checkout | "place my order", "checkout" |
+| `order.track` | User wants to track their order | "where is my order", "track my order" |
+| `order.cancel` | User wants to cancel | "cancel my order" |
+| `faq.delivery` | Asking about delivery | "how long does delivery take" |
+| `faq.refund` | Asking about refunds | "how can i get a refund" |
+| `faq.payment` | Asking about payment | "what payment methods do you accept" |
+| `recommend` | User wants food suggestions (generic) | "suggest something", "what's popular" |
+| `thanks` | User is thanking the bot | "thank you", "thanks" |
+| `goodbye` | User is leaving | "bye", "see you later" |
+| `sentiment.angry` | User is frustrated | "this is terrible", "worst service" |
+| `help` | User needs help | "help me", "what can you do" |
+
+**How the training works internally:**
+
+```
+manager.addDocument('en', 'I want to order burger', 'order.food');
+```
+
+This tells the AI: *"The sentence 'I want to order burger' in English is an example of the `order.food` intent."*
+
+The neural network learns **patterns** from these examples. So even if a user types something it hasn't seen before — like *"can I have a burger please"* — it recognizes the pattern is similar to the training data and classifies it as `order.food`.
+
+> [!TIP]
+> The more example phrases you add per intent, the better the AI gets at recognizing variations. Currently, `order.food` has the most examples (~70+) because food ordering has the most varied ways of expression.
+
+#### Step 3: Named Entity Recognition (NER)
+
+After knowing the *intent*, the bot needs to know the *specifics*. That's what NER does.
+
+```js
+manager.addNamedEntityText('food', 'burger', ['en'], ['burger', 'burgers', 'hamburger', 'veg burger', 'chicken burger']);
+```
+
+This says: *"There's an entity type called `food`. One possible value is `burger`. Whenever you see any of these words — burger, burgers, hamburger, veg burger, chicken burger — mark it as `food = burger`."*
+
+**All registered food entities:**
+
+| Entity Value | Recognized Synonyms |
+|-------------|---------------------|
+| `burger` | burger, burgers, hamburger, veg burger, chicken burger |
+| `pizza` | pizza, pizzas, cheese pizza, margherita, pepperoni pizza |
+| `fries` | fries, french fries, crispy fries |
+| `coke` | coke, coca cola, cold drink, soft drink, drink, drinks, beverage |
+| `sandwich` | sandwich, sandwiches, club sandwich, grilled sandwich |
+| `biryani` | biryani, biriyani, dum biryani, chicken biryani, veg biryani |
+| `pasta` | pasta, penne, spaghetti, macaroni |
+| `noodles` | noodles, chow mein, hakka noodles |
+| `momos` | momos, momo, dumplings, dim sum |
+| `wrap` | wrap, wraps, chicken wrap, paneer wrap |
+| `dessert` | dessert, desserts, ice cream, cake, brownie, pastry, sweet |
+
+#### Step 4: Add Fallback Answers
+
+```js
+manager.addAnswer('en', 'greetings.hello', 'Hello! 👋 Welcome to FoodieBot!...');
+```
+
+These are **default text responses** for each intent. However, most intents are **overridden** by the chatbot handler (which does actual database lookups, cart management, etc.).
+
+#### Step 5: Train and Save
+
+```js
+await manager.train();
+```
+
+This triggers the **neural network training**. The model:
+1. Tokenizes all example sentences (splits into words)
+2. Creates feature vectors (numerical representations of words)
+3. Trains a classifier to map features → intents
+4. Saves the trained model to `model.nlp` (so it doesn't need to retrain every restart — but this code retrains each time)
+
+#### Processing a Message
+
+```js
+export const processMessage = async (message) => {
+  const response = await manager.process('en', message);
+  return response;
+};
+```
+
+When a user sends "I want a burger", `manager.process()` returns:
+
+```js
+{
+  intent: 'order.food',        // What the user wants
+  score: 0.92,                  // How confident the AI is (0 to 1)
+  answer: 'Let me find that for you!',  // Default answer
+  entities: [
+    {
+      entity: 'food',           // Entity type
+      option: 'burger',         // Normalized value
+      utteranceText: 'burger',  // What was actually said
+    }
+  ],
+  sentiment: { ... },           // Sentiment analysis results
+}
+```
+
+---
+
+### [contextManager.js](file:///Users/tanishpatgaonkar/Projects/Chatbot/backend/nlp/contextManager.js) — Remembering Conversations
+
+The context manager keeps track of **ongoing conversations** per session. It's an **in-memory Map** (key = sessionId, value = context object).
+
+```js
+{
+  state: 'IDLE',               // or 'AWAITING_CART_SELECTION'
+  data: {
+    cart: [...],                // User's shopping cart
+    lastSearchResults: [...],   // Last food items shown to user
+    lastOrderId: '...',         // Most recent order ID
+  }
+}
+```
+
+**Why is this needed?**
+
+Multi-turn conversations! Example:
+1. User: "Show me burgers" → Bot shows 4 burgers (saved as `lastSearchResults`)
+2. User: "Add the first one" → Bot needs to know what "the first one" refers to → looks at `lastSearchResults[0]`
+
+Without context, the bot would forget what it just showed and wouldn't understand "the first one".
+
+> [!WARNING]
+> This uses **in-memory storage** (`new Map()`). If the server restarts, all carts and context are **lost**. For production, you'd want to use Redis or a database.
+
+---
+
+### [chatbotHandler.js](file:///Users/tanishpatgaonkar/Projects/Chatbot/backend/nlp/chatbotHandler.js) — The Decision Engine
+
+This is the **biggest and most important file**. It takes the NLP result and decides **what to actually do** — search the database, manage the cart, place orders, etc.
+
+#### The Main Flow (`handleMessage`)
+
+```mermaid
+flowchart TD
+    A["User sends message"] --> B["NLP processes it → intent + entities"]
+    B --> C{"Is there an ongoing\nmulti-turn state?"}
+    C -- "Yes" --> D["handleContextState()"]
+    C -- "No" --> E{"Switch on intent"}
+    
+    E -- "greetings.hello" --> F["Return greeting text"]
+    E -- "menu.show" --> G["Query ALL products from DB\nGroup by category\nReturn menu"]
+    E -- "order.food" --> H["Extract food entity\nSearch DB by name/category\nReturn matching products"]
+    E -- "cart.add" --> I["Find product\nAdd to cart in context\nCalculate total"]
+    E -- "cart.view" --> J["Read cart from context\nFormat and return"]
+    E -- "cart.remove" --> K["Find item in cart\nRemove it\nReturn updated total"]
+    E -- "order.place" --> L["Check user logged in\nCreate Order in DB\nClear cart"]
+    E -- "order.track" --> M["Query recent orders from DB\nReturn statuses"]
+    E -- "recommend" --> N["Check if food-specific\nIf yes: search DB\nIf no: random 4 items"]
+    E -- "None/unknown" --> O["Fallback: fuzzy search\nor show help text"]
+```
+
+#### Key Handler Methods Explained
+
+**`handleSearchFood()`** — When user says "I want a burger":
+1. Takes the food entity extracted by NLP (e.g., "burger")
+2. If NLP didn't extract one, manually scans the text for known food keywords
+3. Queries MongoDB with regex search across `name`, `category`, and `description` fields
+4. Saves results to context (for "add the first one" follow-ups)
+5. Returns product cards to frontend
+
+**`handleAddToCart()`** — When user says "add to cart":
+1. First checks if user said "add the **first** one" → maps to index 0 of lastSearchResults
+2. If not, tries to find product by NLP food entity
+3. If not, does raw text matching against all products
+4. If still not found + there were recent search results → asks user to clarify (sets state to `AWAITING_CART_SELECTION`)
+5. Extracts quantity from text (e.g., "add 2 burgers" → qty = 2)
+6. Adds to cart in context, calculates total
+
+**`handlePlaceOrder()`** — When user says "checkout":
+1. Checks cart isn't empty
+2. Checks user is logged in (needs `userId`)
+3. Creates an `Order` document in MongoDB with all cart items
+4. Clears the cart
+5. Returns order confirmation with order ID
+
+**`handleRecommend()`** — When user says "recommend something":
+1. Checks if user mentioned a specific food (e.g., "recommend burger")
+2. If yes → searches DB for that food category (same as search)
+3. If no → picks 4 **random** products using MongoDB's `$sample` aggregation
+
+**`handleFallback()`** — When NLP doesn't recognize the intent:
+1. Splits user's text into words (3+ characters)
+2. Does a fuzzy regex search in MongoDB (joins words with `|` = OR)
+3. If products found → shows them as "items that might match"
+4. If nothing found → shows a help message with available commands
+
+---
+
+## REST API Layer
+
+Besides the chat, there's also a standard REST API for auth and data management:
+
+### Database Models
+
+| Model | File | Fields | Purpose |
+|-------|------|--------|---------|
+| **User** | [user.model.js](file:///Users/tanishpatgaonkar/Projects/Chatbot/backend/models/user.model.js) | name, email, password (hashed with bcrypt), role | Authentication |
+| **Product** | [product.model.js](file:///Users/tanishpatgaonkar/Projects/Chatbot/backend/models/product.model.js) | name, description, price, category, imageUrl, isAvailable | Food menu items |
+| **Order** | [order.model.js](file:///Users/tanishpatgaonkar/Projects/Chatbot/backend/models/order.model.js) | user, orderItems[], deliveryAddress, paymentMethod, totalPrice, status | Placed orders |
+| **ChatMessage** | [chatMessage.model.js](file:///Users/tanishpatgaonkar/Projects/Chatbot/backend/models/chatMessage.model.js) | user, sessionId, sender, text, intent, confidence, entities | Chat logs (defined but not actively used yet) |
+
+### API Routes
+
+| Method | Route | Auth | What It Does |
+|--------|-------|------|-------------|
+| POST | `/api/auth/register` | Public | Create a new user account |
+| POST | `/api/auth/login` | Public | Login → returns JWT token |
+| GET | `/api/auth/profile` | Protected | Get logged-in user's profile |
+| GET | `/api/products` | Public | Get all food products |
+| POST | `/api/products` | Admin only | Add a new product |
+| POST | `/api/orders` | Protected | Create an order |
+| GET | `/api/orders/:id` | Protected | Get order by ID |
+
+### Authentication Flow
+
+1. User registers/logs in → server creates a **JWT token** (valid for 30 days)
+2. Token is returned in the response body
+3. Frontend stores it and sends it in `Authorization: Bearer <token>` header
+4. [authMiddleware.js](file:///Users/tanishpatgaonkar/Projects/Chatbot/backend/middlewares/authMiddleware.js) verifies the token on protected routes
+5. Password is hashed with **bcrypt** (10 salt rounds) before saving to DB
+
+### Product Seeding
+
+[seedProducts.js](file:///Users/tanishpatgaonkar/Projects/Chatbot/backend/utils/seedProducts.js) pre-populates the database with **28 food items** across 10 categories: burgers, pizza, biryani, pasta, momos, fries, sandwiches, wraps, noodles, drinks, and desserts. It only runs if the DB is empty.
+
+---
+
+## Summary: Complete Request Lifecycle
+
+Here's what happens end-to-end when a user types **"suggest me sandwich"**:
+
+```mermaid
+sequenceDiagram
+    participant U as User (Browser)
+    participant FE as Frontend (React)
+    participant WS as Socket.IO Server
+    participant CH as ChatbotHandler
+    participant NLP as NLP Engine
+    participant CM as ContextManager
+    participant DB as MongoDB
+
+    U->>FE: Types "suggest me sandwich"
+    FE->>WS: emit('chatMessage', {text, sessionId, userId})
+    WS->>CH: handleMessage("suggest me sandwich", sessionId, userId)
+    CH->>NLP: processMessage("suggest me sandwich")
+    NLP-->>CH: {intent: "order.food", score: 0.89, entities: [{food: "sandwich"}]}
+    CH->>CM: getContext(sessionId) → state: IDLE
+    CH->>DB: Product.find({name/category/description ~ "sandwich"})
+    DB-->>CH: [Club Sandwich, Grilled Paneer Sandwich]
+    CH->>CM: updateContext(sessionId, {lastSearchResults: [...]})
+    CH-->>WS: {text: "Found 2 sandwich items!", type: "products", data: {products: [...]}}
+    WS->>FE: emit('botMessage', response)
+    FE->>U: Renders product cards for sandwiches
+```
+
+> [!NOTE]
+> Notice that "suggest me sandwich" gets classified as `order.food` (not `recommend`), because the NLP was specifically trained with phrases like "suggest me sandwich" under the `order.food` intent. This was a deliberate design choice — when a user asks for a recommendation of a *specific food*, it should search for that food, not give random recommendations.
